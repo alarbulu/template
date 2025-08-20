@@ -15,3 +15,35 @@ dev = [
     "pre-commit>=4.2.0",
     "ruff>=0.12.7",
 ]
+
+[tool.ruff]
+line-length = 88
+exclude = [
+  ".direnv",
+  ".git",
+  ".github",
+  ".ipynb_checkpoints",
+  ".pytest_cache",
+  ".venv",
+  "__pycache__",
+  "docker",
+  "htmlcov",
+  "venv",
+]
+
+[tool.ruff.lint]
+extend-select = [
+  "A",  # flake8-builtins
+  "I",  # isort
+  "INP",  # flake8-no-pep420
+  "ISC",  # flake8-implicit-str-concat
+  "UP",  # pyupgrade
+  "W",  # pycodestyle warning
+]
+extend-ignore = [
+  "E501",
+  "E731",
+]
+
+[tool.ruff.lint.isort]
+lines-after-imports = 2
