@@ -21,44 +21,11 @@ _env:
 
     test -f .env || touch .env
 
-_uv +args: virtualenv
-    #!/usr/bin/env bash
-    set -euo pipefail
+devenv: _env && install-precommit
+    uv sync
 
-    LOCKFILE_TIMESTAMP=$(grep -n "exclude-newer = " uv.lock | cut -d'=' -f2 | cut -d'"' -f2) || LOCKFILE_TIMESTAMP=""
-    UV_EXCLUDE_NEWER=${UV_EXCLUDE_NEWER:-$LOCKFILE_TIMESTAMP}
-
-    if [ -n "${UV_EXCLUDE_NEWER}" ]; then
-        # echo "Using uv with UV_EXCLUDE_NEWER=${UV_EXCLUDE_NEWER}."
-        export UV_EXCLUDE_NEWER
-    else
-        unset UV_EXCLUDE_NEWER
-    fi
-
-    opts=""
-    if [ -n "${UV_EXCLUDE_NEWER}" ] && [ -n "$(grep "options.exclude-newer-package" uv.lock)" ]; then
-        touch -d "$UV_EXCLUDE_NEWER" $VIRTUAL_ENV/.target
-        while IFS= read -r line; do
-            package="$(echo "${line%%=*}" | xargs)"
-            date="$(echo "${line#*=}" | xargs)"
-            touch -d "$date" $VIRTUAL_ENV/.package
-            if [[ "{{ args }}" == *"--exclude-newer-package $package"* ]]; then
-                continue # already set by the caller
-            elif [ $VIRTUAL_ENV/.package -nt $VIRTUAL_ENV/.target ]; then
-                opts="$opts --exclude-newer-package $package=$date"
-            else
-                echo "The cutoff for $package ($date) is older than the global cutoff and will no longer be specified."
-            fi
-        done < <(sed -n '/options.exclude-newer-package/,/^$/p' uv.lock | grep '=')
-    fi
-
-    uv {{ args }} $opts || exit 1
-
-lock *args: (_uv "lock" args)
-
-devenv: _env lock (_uv "sync --frozen") && install-precommit
-
-prodenv: _env lock (_uv "sync --frozen --no-dev")
+prodenv: _env
+    uv sync --no-dev
 
 install-precommit:
     #!/usr/bin/env bash
@@ -85,48 +52,43 @@ test *args: devenv
     PYTHONPATH={{ justfile_directory() }}/app {{ BIN }}/coverage run --source {{ justfile_directory() }} --module pytest {{ args }}
     {{ BIN }}/coverage report || {{ BIN }}/coverage html
 
+# Upgrade a single package to the latest version as of the cutoff in pyproject.toml
+upgrade-package package: && devenv
+    uv lock --upgrade-package {{ package }}
 
 
-update-dependencies date="": virtualenv
-    #!/usr/bin/env bash
-    set -euo pipefail
+# Upgrade all packages to the latest versions as of the cutoff in pyproject.toml
+upgrade-all: && devenv
+    uv lock --upgrade
 
-    LOCKFILE_TIMESTAMP=$(grep -n "exclude-newer = " uv.lock | cut -d'=' -f2 | cut -d'"' -f2) || LOCKFILE_TIMESTAMP=""
-    if [ -z "{{ date }}" ]; then
-        UV_EXCLUDE_NEWER=${UV_EXCLUDE_NEWER:-$LOCKFILE_TIMESTAMP}
-    else
-        UV_EXCLUDE_NEWER=${UV_EXCLUDE_NEWER:-$(date -d "{{ date }}" +"%Y-%m-%dT%H:%M:%SZ")}
-    fi
 
-    if [ -n "${UV_EXCLUDE_NEWER}" ]; then
-        if [ -n "${LOCKFILE_TIMESTAMP}" ]; then
-            touch -d "$UV_EXCLUDE_NEWER" $VIRTUAL_ENV/.target
-            touch -d "$LOCKFILE_TIMESTAMP" $VIRTUAL_ENV/.existing
-            if [ $VIRTUAL_ENV/.existing -nt $VIRTUAL_ENV/.target ]; then
-                echo "The lockfile timestamp is newer than the target cutoff. Using the lockfile timestamp."
-                UV_EXCLUDE_NEWER=$LOCKFILE_TIMESTAMP
-            fi
-        fi
-        echo "UV_EXCLUDE_NEWER set to $UV_EXCLUDE_NEWER."
-        export UV_EXCLUDE_NEWER
-    else
-        echo "UV_EXCLUDE_NEWER not set."
-        unset UV_EXCLUDE_NEWER
-    fi
+# Move the cutoff date in pyproject.toml to N days ago (default: 7) at midnight UTC
+bump-uv-cutoff days="7":
+    #!/usr/bin/env -S uvx --with tomlkit python3
 
-    opts=""
-    if [ -n "${UV_EXCLUDE_NEWER}" ] && [ -n "$(grep "options.exclude-newer-package" uv.lock)" ]; then
-        touch -d "$UV_EXCLUDE_NEWER" $VIRTUAL_ENV/.target
-        while IFS= read -r line; do
-            package="$(echo "${line%%=*}" | xargs)"
-            date="$(echo "${line#*=}" | xargs)"
-            touch -d "$date" $VIRTUAL_ENV/.package
-            if [ $VIRTUAL_ENV/.package -nt $VIRTUAL_ENV/.target ]; then
-                opts="$opts --exclude-newer-package $package=$date"
-            else
-                echo "The cutoff for $package ($date) is older than the global cutoff and will no longer be specified."
-            fi
-        done < <(sed -n '/options.exclude-newer-package/,/^$/p' uv.lock | grep '=')
-    fi
+    import datetime
+    import tomlkit
 
-    uv lock --upgrade $opts || exit 1
+    with open("pyproject.toml", "rb") as f:
+        content = tomlkit.load(f)
+
+    new_datetime = (
+        datetime.datetime.now(datetime.UTC) - datetime.timedelta(days=int("{{ days }}"))
+    ).replace(hour=0, minute=0, second=0, microsecond=0)
+    new_timestamp = new_datetime.strftime("%Y-%m-%dT%H:%M:%SZ")
+    if existing_timestamp := content["tool"]["uv"].get("exclude-newer"):
+        if new_datetime < datetime.datetime.fromisoformat(existing_timestamp):
+            print(
+                f"Existing cutoff {existing_timestamp} is more recent than {new_timestamp}, not updating."
+            )
+            exit(0)
+    content["tool"]["uv"]["exclude-newer"] = new_timestamp
+
+    with open("pyproject.toml", "w") as f:
+        tomlkit.dump(content, f)
+
+
+# This is the default input command to update-dependencies action
+# https://github.com/bennettoxford/update-dependencies-action
+# Bump the timestamp cutoff to midnight UTC 7 days ago and upgrade all dependencies
+update-dependencies: bump-uv-cutoff upgrade-all
