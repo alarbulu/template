@@ -1,0 +1,2 @@
+# When cloning, do not copy the tests folder
+tests/ export-ignore
